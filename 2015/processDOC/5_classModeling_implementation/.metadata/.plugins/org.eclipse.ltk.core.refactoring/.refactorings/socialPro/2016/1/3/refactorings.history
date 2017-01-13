@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Copy element &apos;FolderForm.java&apos; to &apos;socialPro/src/form&apos;&#x0D;&#x0A;- Original project: &apos;socialPro&apos;&#x0D;&#x0A;- Destination element: &apos;socialPro/src/form&apos;&#x0D;&#x0A;- Original element: &apos;form.FolderForm.java&apos;" description="Copy compilation unit" destination="/src&lt;form" element1="/src&lt;form{FolderForm.java" files="0" flags="589830" folders="0" id="org.eclipse.jdt.ui.copy" policy="org.eclipse.jdt.ui.copyResources" stamp="1452430664982" units="1" version="1.0"/>
+</session>

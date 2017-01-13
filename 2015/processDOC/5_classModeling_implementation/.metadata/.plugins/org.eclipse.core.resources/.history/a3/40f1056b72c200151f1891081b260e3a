@@ -1,0 +1,727 @@
+package action;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.GregorianCalendar;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.StringTokenizer;
+
+import model.CommitInfo;
+import model.CommitMessage;
+import model.OriginFile;
+import remoteAction.DeleteDiffFileAction;
+import remoteAction.DiffFileActionImpl;
+import remoteAction.InsertDiffFileAction;
+import remoteAction.RemoteFileSearchAction;
+import remoteAction.SearchDiffFileAction;
+import socialProExceptions.CommitExcetion;
+import socialProExceptions.DAOException;
+import socialProExceptions.FileException;
+import socialProExceptions.RemoteFileException;
+
+import com.jcraft.jsch.JSchException;
+import com.jcraft.jsch.SftpException;
+
+import dao.CommitDAO;
+import dao.CopiedInfoDAO;
+import dao.DAO;
+import dao.FileDAO;
+import dao.MergeDAO;
+import dto.CommitDTO;
+import dto.CopiedInfoDTO;
+import dto.FileDTO;
+import dto.MergeDTO;
+import factory.DAOFactory;
+import factory.RemoteActionFactory;
+
+public class CommitActionImpl extends BaseAction implements CommitSearchAction,CommitInsertAction,CommitDropAction,CommitUpdateAction{
+
+	public CommitActionImpl() {
+		// TODO Auto-generated constructor stub
+		this.setDAO((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO"));
+	}
+	
+	@Override
+	public void setDAO(DAO dao) {
+		// TODO Auto-generated method stub
+		this.dao = (CommitDAO)dao;
+	}
+	
+/////////////////////////////////////////////////////////////////// insert
+	
+	@Override
+	public String insertCommit(CommitInfo commitInfo) throws DAOException, CommitExcetion {
+		// TODO Auto-generated method stub
+		
+		String res = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).insertCommit(new CommitDTO(commitInfo.getTitle(), commitInfo.getMemberCode(), commitInfo.getDate(), commitInfo.getObjectCode(), commitInfo.getContent(), convertMerge(commitInfo.isMerge()),convertType(commitInfo.getKind())));
+		if(res==null)throw new CommitExcetion("Error insert Commit at Action.");
+		return res;
+	}
+	
+	@Override
+	public CommitInfo mergeCommit(String oriCommitCode, String setCode) throws DAOException, CommitExcetion, ParseException{
+		// TODO Auto-generated method stub
+		System.out.println("oriSetCode ::    "+oriCommitCode);
+		CommitDTO dto = ((CommitDAO)this.getDAO()).searchCommitCode(oriCommitCode);
+		
+		if(dto==null)return null;
+		
+		GregorianCalendar cal = new GregorianCalendar();
+		DateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+		df.setTimeZone(cal.getTimeZone());
+		
+		String res = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).insertCommit(new CommitDTO(dto.getTitle(), dto.getOwnerCode(), df.format(cal.getTime()), setCode, dto.getContent(), 0,this.convertType("modify")));
+		if(res==null)throw new CommitExcetion("Error insert Commit at Action.");
+		
+		dto.setCommitCode(res);
+		dto.setInsertDate(df.format(cal.getTime()));
+		dto.setSetCode(setCode);
+		
+		((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).updateCommitMerge(oriCommitCode, 1);
+		List codeList  = new ArrayList<String>();
+		codeList.add(oriCommitCode);
+		((MergeDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("MergeDAO")).insertMerge(new MergeDTO(res,codeList));
+		return this.makeModel(dto);
+	}
+
+	@Override
+	public String copyCommit(String memberCode, String cpSetCode, String cal,String oriSetCode,int type) throws DAOException, CommitExcetion{
+		System.out.println("oriSetCode ::    "+oriSetCode);
+		CommitDTO dto = ((CommitDAO)this.getDAO()).searchCommitBySetCode(oriSetCode, type);
+		if(dto!=null){
+			
+			CommitDTO insertDTO = new CommitDTO(dto.getTitle(), memberCode, cal, cpSetCode, dto.getContent(), 0, type);
+			return ((CommitDAO)this.getDAO()).insertCommit(insertDTO);
+		}
+		return null;
+	}
+	
+	@Override
+	public CommitInfo copyCommit(String commitCode, String oriSetCode, String oriOwnerCode, String insertDate, String type) throws DAOException, CommitExcetion, ParseException{
+		CommitDTO commitDTO = ((CommitDAO)this.getDAO()).searchCommitCode(commitCode);
+		String cpObj = commitDTO.getSetCode();
+		
+		commitDTO.setCommitCode(null);
+		commitDTO.setInsertDate(insertDate);
+		commitDTO.setMerge(0);
+		commitDTO.setOwnerCode(oriOwnerCode);
+		commitDTO.setSetCode(oriSetCode);
+		commitDTO.setType(this.convertType(type));
+		
+		String resCommitCode = ((CommitDAO)this.getDAO()).insertCommit(commitDTO);
+		if(resCommitCode==null)return null;
+		commitDTO.setCommitCode(resCommitCode);
+		
+		((CopiedInfoDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("copiedInfoDAO")).insertCopiedInfo(new CopiedInfoDTO(cpObj, oriSetCode));
+		
+		((CommitDAO)this.getDAO()).updateCommitMerge(commitCode, 1);
+		List codeList  = new ArrayList<String>();
+		codeList.add(commitCode);
+		((MergeDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("MergeDAO")).insertMerge(new MergeDTO(resCommitCode, codeList));
+		
+		return this.makeModel(commitDTO);
+	}
+
+	
+//////////////////////////////////////////////////////////////////  search
+	
+	
+	@Override
+	public List<CommitInfo> searchCommitCodeAll(String commitCode) throws DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException, ParseException {
+		// TODO Auto-generated method stub
+		
+		List<CommitInfo> resCommitInfoList = new ArrayList<CommitInfo>();
+		CommitDTO commitDTO = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitCode(commitCode);
+		if(commitDTO!=null){
+			
+			//(CopiedFolder originFolder) (copiedFile originFile) is mixed list
+			List<CommitDTO> commitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(commitDTO.getSetCode(), 0, commitDTO.getInsertDate());
+			if(!commitDTOList.isEmpty()){
+				
+				FileDTO fileDTO=((FileDAO)this.getDAO()).searchFileCode(commitDTO.getSetCode());
+				if(fileDTO==null)throw new FileException("Error when search File..");
+				
+				//copy originFileContent to tmp
+				String oriFileCode = fileDTO.getFileCode();
+				System.out.println(oriFileCode);
+				((DiffFileActionImpl)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).copyFileToTmp(fileDTO.getFileContent(), oriFileCode);
+				
+				for(CommitDTO val : commitDTOList){
+					//copy origin
+					String remoteDiffPath = (fileDTO.getFileContent()).replaceAll(fileDTO.getFileCode(), val.getCommitCode());
+					System.out.println(remoteDiffPath);
+					//get diff content
+					String res=((SearchDiffFileAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).searchDiffFile(fileDTO.getFileContent(), remoteDiffPath);
+					if(res!=null){
+						CommitInfo commit = this.makeModel(commitDTO, res);
+						if(val!=null)resCommitInfoList.add(commit);
+					}
+					//remove changed file and return ori file
+					if(!((DeleteDiffFileAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).removeTmpFile(fileDTO.getFileContent())){
+						throw new RemoteFileException("Error Delete Temp Files..");
+					}
+				}
+
+				//move to realPath
+				((DiffFileActionImpl)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).copyTmpFileToPath(fileDTO.getFileContent(), oriFileCode);
+			}
+		}
+		
+		return resCommitInfoList;
+	}
+
+	@Override
+	public List<CommitInfo> searchCommitCode(String commitCode) throws DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException, ParseException {
+		// TODO Auto-generated method stub
+		System.out.println("\n           CommitActionImple ::   searchCommitCode  128 start @");
+		CommitInfo commit = null;
+		CommitDTO commitDTO = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitCode(commitCode);
+		
+		if(commitDTO!=null){
+			
+			System.out.println(commitDTO.getCommitCode());
+			List<CommitDTO> commitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(commitDTO.getSetCode(), commitDTO.getInsertDate());
+			if(!commitDTOList.isEmpty()){
+				Map<String,List<CommitInfo>> resTmpMap = this.makeModel(commitDTOList);
+				if(!resTmpMap.isEmpty()){
+					List<CommitInfo> folderCommitList = resTmpMap.get("folderCommit");
+					List<CommitInfo> fileCommitList = resTmpMap.get("fileCommit");
+					List<CommitInfo> commitInfoList = new ArrayList<CommitInfo>();
+					if(!folderCommitList.isEmpty())commitInfoList.addAll(folderCommitList);
+					if(!fileCommitList.isEmpty())commitInfoList.addAll(this.makeModelContent(fileCommitList));
+					return commitInfoList;
+				}
+			}
+		}
+		
+		return new ArrayList<CommitInfo>();
+	}
+
+	@Override
+	public CommitInfo searchOnlyCommitCode(String commitCode) throws DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException, ParseException {
+		// TODO Auto-generated method stub
+		System.out.println("\n           CommitActionImple ::   searchCommitCode  128 start @");
+		CommitInfo commit = null;
+		CommitDTO commitDTO = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitCode(commitCode);
+		if(commitDTO==null)return null;
+		return this.makeModel(commitDTO);
+	}
+	@Override
+	public List<CommitInfo> searchCommitContent(List<CommitInfo> commitInfoList) throws DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException, ParseException{
+		
+		return this.makeModelContent(commitInfoList);
+	}
+	@Override
+	public List<CommitInfo> searchCommitCodesAll(String commitCode) throws DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException, ParseException {
+		// TODO Auto-generated method stub
+		
+		CommitDTO commitDTO = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitCode(commitCode);
+		if(commitDTO!=null){
+			List<CommitDTO> commitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(commitDTO.getSetCode(), commitDTO.getInsertDate());
+			if(!commitDTOList.isEmpty()){
+				
+				Map<String,List<CommitInfo>> resTmpMap = this.makeModel(commitDTOList);
+				if(!resTmpMap.isEmpty()){
+					List<CommitInfo> folderCommitList = resTmpMap.get("folderCommit");
+					List<CommitInfo> fileCommitList = resTmpMap.get("fileCommit");
+					List<CommitInfo> commitInfoList = new ArrayList<CommitInfo>();
+					if(!folderCommitList.isEmpty())commitInfoList.addAll(folderCommitList);
+					if(!fileCommitList.isEmpty())commitInfoList.addAll(this.makeModelContent(fileCommitList));
+					return commitInfoList;
+				}
+			}
+		}
+		
+		return new ArrayList<CommitInfo>();
+	}
+
+	@Override
+	public Map<String,CommitInfo> searchCommitCodeList(List<String> commitCodeList) throws DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException, ParseException{
+		// TODO Auto-generated method stub
+
+		Map<String,CommitInfo> resCommitInfoMap = new HashMap<String,CommitInfo>();
+		for(String commitCode : commitCodeList){
+			CommitDTO commitDTO = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitCode(commitCode);
+			if(commitDTO!=null){
+				List<CommitDTO> commitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(commitDTO.getSetCode(), 0, commitDTO.getInsertDate());
+				if(!commitDTOList.isEmpty()){
+					
+					FileDTO fileDTO=((FileDAO)this.getDAO()).searchFileCode(commitDTO.getSetCode());
+					if(fileDTO==null)throw new FileException("Error when search File..");
+					
+					//copy originFileContent to tmp
+					String oriFileCode = fileDTO.getFileCode();
+					System.out.println(oriFileCode);
+					((DiffFileActionImpl)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).copyFileToTmp(fileDTO.getFileContent(), oriFileCode);
+					
+					for(CommitDTO val : commitDTOList){
+						//copy origin
+						String remoteDiffPath = (fileDTO.getFileContent()).replaceAll(fileDTO.getFileCode(), val.getCommitCode());
+						System.out.println(remoteDiffPath);
+						//get diff content
+						String res=((SearchDiffFileAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).searchDiffFile(fileDTO.getFileContent(), remoteDiffPath);
+						if(res!=null){
+							CommitInfo commit = this.makeModel(commitDTO, res);
+							System.out.println(commit.getDescription()+"\n==========");
+							if(val!=null){
+								if(!resCommitInfoMap.containsKey(val.getCommitCode()))resCommitInfoMap.put(val.getCommitCode(), commit);
+							}
+						}else{System.out.println("res.........is nullllllllllll!!!!!!!!!!!    "+"\n------------");}
+						//remove changed file and return ori file
+						if(!((DeleteDiffFileAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).removeTmpFile(fileDTO.getFileContent())){
+							throw new RemoteFileException("Error Delete Temp Files..");
+						}
+					}
+					
+					//move to realPath
+					((DiffFileActionImpl)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).copyTmpFileToPath(fileDTO.getFileContent(), oriFileCode);
+				}
+			}
+		}
+		
+		return resCommitInfoMap;
+	}
+
+	@Override
+	public Map<String, List<CommitInfo>> searchProjectCommitList(Map<String, Map<String, List<String>>> projectChildren)
+			throws DAOException, FileException, FileNotFoundException,SftpException, IOException, JSchException, RemoteFileException,ParseException {
+		// TODO Auto-generated method stub
+		Map<String, List<CommitInfo>> resMap  = new HashMap<String, List<CommitInfo>>();
+		
+		for(String projectCode : projectChildren.keySet()){
+			Map<String,List<String>> children = projectChildren.get(projectCode);
+			if(!children.isEmpty()){
+				List<String> folderList = children.get("folder");
+				List<String> fileList = children.get("file");
+				List<CommitDTO> commitDTOList = new ArrayList<CommitDTO>();
+				
+				if(!fileList.isEmpty()){
+					List<CommitDTO> fileCommitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(fileList);
+					if(!fileCommitDTOList.isEmpty())commitDTOList.addAll(fileCommitDTOList);
+				}
+				if(!folderList.isEmpty()){
+					List<CommitDTO> folderCommitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(folderList);
+					if(!folderCommitDTOList.isEmpty())commitDTOList.addAll(folderCommitDTOList);
+				}
+				
+				if(!commitDTOList.isEmpty()){
+					//List<CommitInfo> infoList = new ArrayList<CommitInfo>();
+					Map<String,List<CommitInfo>> resTmpMap = this.makeModel(commitDTOList);
+					for(String keyVal : resTmpMap.keySet()){
+						List<CommitInfo> infoList = resTmpMap.get(keyVal);
+						if(!infoList.isEmpty()){
+						Map<String,List<CommitInfo>> tmpMap = new HashMap<String, List<CommitInfo>>();
+						for(CommitInfo commitInfo : infoList){
+							String setCode = commitInfo.getObjectCode();
+							System.out.println("setCode : "+setCode);
+							if(!tmpMap.containsKey(setCode)){
+								List<CommitInfo> tmpList = new ArrayList<CommitInfo>();
+								tmpList.add(commitInfo);
+								tmpMap.put(setCode, tmpList);
+							}else{
+								tmpMap.get(setCode).add(commitInfo);
+							}
+						}
+						if(new StringTokenizer(keyVal, "_").nextToken().equals("file")){
+							//get commit content for file
+							for(List<CommitInfo> list : tmpMap.values()){
+								if(!list.isEmpty()){
+									this.makeModelContent(list);
+								}
+							}
+							resMap.put(projectCode, infoList);
+						}
+						}
+					}
+				}
+			}
+		}
+		
+		return resMap;
+	}
+
+	@Override
+	public List<CommitInfo> searchMemberProjectCommitList(String memberCode,Map<String, List<String>> projectChildren) throws FileNotFoundException, ParseException, DAOException, FileException, SftpException, IOException, JSchException, RemoteFileException {
+		// TODO Auto-generated method stub
+		List<CommitInfo> infoList = new ArrayList<CommitInfo>();
+		if(!projectChildren.isEmpty()){
+			List<String> folderList = projectChildren.get("folder");
+			List<String> fileList = projectChildren.get("file");
+			List<CommitDTO> commitDTOList = new ArrayList<CommitDTO>();
+			
+			if(!fileList.isEmpty()){
+				List<CommitDTO> fileCommitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(fileList);
+				if(!fileCommitDTOList.isEmpty())commitDTOList.addAll(fileCommitDTOList);
+			}
+			if(!folderList.isEmpty()){
+				List<CommitDTO> folderCommitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(folderList);
+				if(!folderCommitDTOList.isEmpty())commitDTOList.addAll(folderCommitDTOList);
+			}
+			
+			if(!commitDTOList.isEmpty()){
+				//List<CommitInfo> infoList = new ArrayList<CommitInfo>();
+				Map<String,List<CommitInfo>> resTmpMap = this.makeModel(commitDTOList);
+				if(!resTmpMap.isEmpty()){
+					List<CommitInfo> tmpFolderCommitList = resTmpMap.get("folderCommit");
+					List<CommitInfo> tmpFileCommitList = resTmpMap.get("fileCommit");
+					if(!tmpFileCommitList.isEmpty()){
+						infoList.addAll(this.makeModelContent(tmpFileCommitList));
+					}
+					if(!tmpFolderCommitList.isEmpty()) infoList.addAll(tmpFolderCommitList);
+				}
+			}
+		}
+		return infoList;
+	}
+	
+	@Override
+	public Map<String, List<CommitInfo>> searchTeamProjectCommitList(Map<String, Map<String, List<String>>> teamProjectChildren)
+			throws DAOException, FileException, FileNotFoundException,SftpException, IOException, JSchException, RemoteFileException,ParseException {
+		// TODO Auto-generated method stub
+		Map<String, List<CommitInfo>> resMap  = new HashMap<String, List<CommitInfo>>();
+		
+		for(String projectCode : teamProjectChildren.keySet()){
+			Map<String,List<String>> children = teamProjectChildren.get(projectCode);
+			if(!children.isEmpty()){
+				List<String> folderList = children.get("folder");
+				List<String> fileList = children.get("file");
+				folderList.addAll(fileList);
+				List<CommitDTO> commitDTOList = new ArrayList<CommitDTO>();
+				if(!folderList.isEmpty()){
+					commitDTOList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(folderList);
+				}
+
+				if(!commitDTOList.isEmpty()){
+					//List<CommitInfo> infoList = new ArrayList<CommitInfo>();
+					Map<String,List<CommitInfo>> resTmpMap = this.makeModel(commitDTOList);
+					for(String keyVal : resTmpMap.keySet()){
+						List<CommitInfo> infoList = resTmpMap.get(keyVal);
+						if(!infoList.isEmpty()){
+						Map<String,List<CommitInfo>> tmpMap = new HashMap<String, List<CommitInfo>>();
+						for(CommitInfo commitInfo : infoList){
+							String setCode = commitInfo.getObjectCode();
+							System.out.println("setCode : "+setCode);
+							if(!tmpMap.containsKey(setCode)){
+								List<CommitInfo> tmpList = new ArrayList<CommitInfo>();
+								tmpList.add(commitInfo);
+								tmpMap.put(setCode, tmpList);
+							}else{
+								tmpMap.get(setCode).add(commitInfo);
+							}
+						}
+						if(new StringTokenizer(keyVal, "_").nextToken().equals("file")){
+							//get commit content for file
+							for(List<CommitInfo> list : tmpMap.values()){
+								if(!list.isEmpty()){
+									this.makeModelContent(list);
+								}
+							}
+							resMap.put(projectCode, infoList);
+						}
+						}
+					}
+				}
+			}
+		}
+		
+		return resMap;
+	}
+	
+	@Override
+	public List<CommitInfo> searchCommitInfoContentDetails(String fileCode, List<CommitInfo> commitInfoList) throws FileNotFoundException, ParseException, DAOException, FileException, SftpException, IOException, JSchException, RemoteFileException{
+		
+		List<String> commitList = new ArrayList<String>();
+		for(CommitInfo commit : commitInfoList){
+			commitList.add(commit.getCode());
+		}
+		List<CommitDTO> dtoList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitCode(commitList);
+		int len = dtoList.size()-1;
+		if(!dtoList.isEmpty()){
+			dtoList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(dtoList.get(len).getSetCode(), dtoList.get(len).getInsertDate());
+			return this.makeModelContent(this.makeModel(dtoList).get("fileCommit"));
+		}
+		return commitInfoList;
+	}
+	@Override
+	public List<CommitInfo> searchCommitInfoByDate(String objCode,String date) throws DAOException, FileNotFoundException, ParseException, FileException, SftpException, IOException, JSchException, RemoteFileException{
+		
+		List<CommitInfo> resList = new ArrayList<CommitInfo>();
+		List<CommitDTO> dtoList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(objCode, date);
+		if(!dtoList.isEmpty()){
+			Map<String,List<CommitInfo>> tmpMap = this.makeModel(dtoList);
+			List<CommitInfo> folderCommitList = tmpMap.get("folderCommit");
+			List<CommitInfo> fileCommitList = tmpMap.get("fileCommit");
+			
+			if(!folderCommitList.isEmpty())resList.addAll(folderCommitList);
+			if(!fileCommitList.isEmpty())resList.addAll(fileCommitList);
+			return resList;
+		}
+		return resList;
+	}
+
+	@Override
+	public List<CommitInfo> searchCommitInfoContentByDate(String objCode,String date) throws DAOException, FileNotFoundException, ParseException, FileException, SftpException, IOException, JSchException, RemoteFileException{
+
+		List<CommitInfo> resList = new ArrayList<CommitInfo>();
+		List<CommitDTO> dtoList = ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).searchCommitsCode(objCode, date);
+		if(!dtoList.isEmpty()){
+			Map<String,List<CommitInfo>> tmpMap = this.makeModel(dtoList);
+			List<CommitInfo> folderCommitList = tmpMap.get("folderCommit");
+			List<CommitInfo> fileCommitList = tmpMap.get("fileCommit");
+			
+			if(!folderCommitList.isEmpty())resList.addAll(folderCommitList);
+			if(!fileCommitList.isEmpty())resList.addAll(this.makeModelContent(fileCommitList));
+			return resList;
+		}
+		return resList;
+	}
+///////////////////////////////////////////////////////////////////////        modify
+	
+	@Override
+	public boolean sendMergeCommitMsg(CommitMessage commitMsg) throws DAOException{
+		
+		Map<String,List<String>> commitMap = commitMsg.getCommitMap();
+		if(!commitMap.isEmpty()){
+			for(List<String> list : commitMap.values()){
+				
+			}
+		}
+		
+	}
+
+	@Override
+	public boolean sendMergeCommitList(List<String> commitCodeList) throws DAOException {
+		// TODO Auto-generated method stub
+		
+		return ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).updateCommitMerge(commitCodeList, 1);
+		
+	}
+
+	public boolean sendMergeCommit(String commitCode) throws DAOException{
+		return ((CommitDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("commitDAO")).updateCommitMerge(commitCode, 1);
+	}
+	
+	
+	
+////////////////////////
+	
+	private CommitInfo makeModel(CommitDTO dto,String fileDes) throws ParseException{
+		
+		String kind=null;
+		boolean merge=false;;
+		switch (dto.getType()) {
+		case 0:
+			kind="delete";
+			break;
+		case 1:
+			kind="create";
+			break;
+		case 2:
+			kind="modify";
+			break;
+		}
+		switch (dto.getMerge()) {
+		case 0:
+			merge=false;
+			break;
+		case 1:
+			merge=true;
+			break;
+		}
+		if(fileDes!=null)System.out.println("fileDes...... is okkkkkkkk");
+		else System.out.println("fileDes...... is null..........--");
+		CommitInfo res = new CommitInfo(dto.getCommitCode(), dto.getSetCode(), kind, dto.getContent(), dto.getInsertDate(), dto.getOwnerCode(), merge, fileDes, dto.getTitle(),null);
+		
+		return res;
+	}
+
+	private List<CommitInfo> makeModel(Map<CommitDTO,String> commitDtoMap) throws ParseException{
+		List<CommitInfo> resList = new ArrayList<CommitInfo>();
+		
+		for(CommitDTO dto : commitDtoMap.keySet()){
+			String kind=null;
+			boolean merge=false;;
+			switch (dto.getType()) {
+			case 0:
+				kind="delete";
+				break;
+			case 1:
+				kind="create";
+				break;
+			case 2:
+				kind="modify";
+				break;
+			}
+			switch (dto.getMerge()) {
+			case 0:
+				merge=false;
+				break;
+			case 1:
+				merge=true;
+				break;
+			}
+			CommitInfo res = new CommitInfo(dto.getCommitCode(), dto.getSetCode(), kind, dto.getContent(), dto.getInsertDate(), dto.getOwnerCode(), merge, commitDtoMap.get(dto), dto.getTitle(),null);
+			if(res!=null)resList.add(res);
+		}
+		return resList;
+	}
+
+	private CommitInfo makeModel(CommitDTO dto) throws ParseException{
+		
+		String kind=null;
+		boolean merge=false;;
+		switch (dto.getType()) {
+		case 0:
+			kind="delete";
+			break;
+		case 1:
+			kind="create";
+			break;
+		case 2:
+			kind="modify";
+			break;
+		}
+		switch (dto.getMerge()) {
+		case 0:
+			merge=false;
+			break;
+		case 1:
+			merge=true;
+			break;
+		}
+		CommitInfo res = new CommitInfo(dto.getCommitCode(), dto.getSetCode(), kind, dto.getContent(), dto.getInsertDate(), dto.getOwnerCode(), merge, null, dto.getTitle(),null);
+		
+		return res;
+	}
+
+	private Map<String,List<CommitInfo>> makeModel(List<CommitDTO> commitDtoMap) throws ParseException{
+		System.out.println("CommitActionImpl  makeModel.... line 592");
+		Map<String,List<CommitInfo>> resMap = new HashMap<String, List<CommitInfo>>();
+		List<CommitInfo> fileCommitList = new ArrayList<CommitInfo>();
+		List<CommitInfo> folderCommitList = new ArrayList<CommitInfo>();
+		
+		for(CommitDTO dto : commitDtoMap){
+			
+			String kind=null;
+			boolean merge=false;;
+			switch (dto.getType()) {
+			case 0:
+				kind="create";
+				break;
+			case 1:
+				kind="modify";
+				break;
+			case 2:
+				kind="delete";
+				break;
+			}
+			switch (dto.getMerge()) {
+			case 0:
+				merge=false;
+				break;
+			case 1:
+				merge=true;
+				break;
+			}
+			CommitInfo res = new CommitInfo(dto.getCommitCode(), dto.getSetCode(), kind, dto.getContent(), dto.getInsertDate(), dto.getOwnerCode(), merge, null, dto.getTitle(),null);
+			System.out.println( dto.getSetCode()+"  ///   "+res.getObjectCode()+"  merge : "+merge);
+			if(res!=null){
+				StringTokenizer tokens = new StringTokenizer(dto.getSetCode(), "_");
+				if(tokens.nextToken().equals("folder")){
+					System.out.println("add folderCommit  : "+dto.getSetCode());
+					folderCommitList.add(res);
+				}else{
+					System.out.println("add fileCommit  : "+dto.getSetCode());
+					fileCommitList.add(res);
+				}
+			}
+		}
+		resMap.put("folderCommit", folderCommitList);
+		resMap.put("fileCommit", fileCommitList);
+	
+		return resMap;
+	}
+	
+	private List<CommitInfo> makeModelContent(List<CommitInfo> commitInfoList) throws ParseException, DAOException, FileException, FileNotFoundException, SftpException, IOException, JSchException, RemoteFileException{
+		System.out.println("\n\n                             CommitActionImpl :: makeModelContent "+commitInfoList.size());
+		System.out.println("size : "+commitInfoList.get(0).getObjectCode());
+		FileDTO fileDTO=((FileDAO)DAOFactory.getDAOFACTORY_INSTANCE().create("fileDAO")).searchFileCode(commitInfoList.get(0).getObjectCode());
+		if(fileDTO==null)throw new FileException("Error when search File..");
+		
+		//copy originFileContent to tmp
+		String oriFileCode = fileDTO.getFileCode();
+		System.out.println(oriFileCode);
+		((DiffFileActionImpl)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).copyFileToTmp(fileDTO.getFileContent(), oriFileCode);
+		System.out.println("1. copy orignFileContent to tmp : path : "+fileDTO.getFileContent()+"   tmp_Path  =>  /home/socialPro/tmp/"+oriFileCode);
+		
+		int size = commitInfoList.size();
+		for(int i=0;i<size;i++){
+			
+			System.out.println(" ## i  : "+i+"       "+commitInfoList.get(i).getKind()+"  commitCode : "+commitInfoList.get(i).getCode());
+			if(commitInfoList.get(i).getKind().equals("modify")){
+				System.out.println("\n--------------------- --------------    ## i  : "+i+"    commitCode : "+commitInfoList.get(i)+"   commitTitle   :   "+commitInfoList.get(i).getTitle());
+				String remoteDiffPath = (fileDTO.getFileContent()).replaceAll(fileDTO.getFileCode(), commitInfoList.get(i).getCode());
+				System.out.println(remoteDiffPath);
+				
+				//previous version
+				File resFile=null;
+				OriginFile oriCFile=null;
+				if(!((InsertDiffFileAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).patchFile(remoteDiffPath, fileDTO.getFileContent()))throw new RemoteFileException("Error Delete Temp Files..");
+				
+				System.out.println(i+"-1. get  previous version ");
+				
+				//get originFile content
+				String oriPath = "C:\\socialPro\\"+fileDTO.getFileCode();
+				resFile = ((RemoteFileSearchAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("RemoteFileActionImpl")).searchFile(fileDTO.getFileContent(), oriPath);
+				oriCFile = new OriginFile(resFile.getPath());
+				if(oriCFile.readFile()){
+					commitInfoList.get(i).setOriginFileDescriptioin(oriCFile.getContent());
+					System.out.println("res.....setOriginFileDescriptioin....is ooooookkkkkkkkk            $^$^$^     ======  ====");
+					if(oriCFile.getContent()!=null)System.out.println(oriCFile.getContent());
+				}
+				if(resFile.exists())resFile.delete();
+				if(oriCFile.exists())oriCFile.delete();
+				System.out.println(i+"-2. get perviouse file content : path : "+oriPath);
+				
+				//get diff content
+				File diffFile = ((RemoteFileSearchAction)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("RemoteFileActionImpl")).searchDiffFile(remoteDiffPath, commitInfoList.get(i).getCode());
+				OriginFile oriFile = new OriginFile(diffFile.getPath());
+				if(oriFile.readFile()){
+					commitInfoList.get(i).setDescription(oriFile.getContent());
+					System.out.println("res.....setDescription....is ooooookkkkkkkkk            $^$^$^     ======  ====");
+				}else System.out.println("res.........is nULL $^$^$^     ======  ====");
+				if(diffFile.exists())diffFile.delete();
+				if(oriFile.exists())oriFile.delete();
+				System.out.println(i+"-3. get file diff COntent path :: "+remoteDiffPath+" ");
+				System.out.println("--------------------- --------------\n");
+			}
+		}
+		//move to realPath
+		((DiffFileActionImpl)RemoteActionFactory.getREMOTEACTIONFACTORY_INSTANCE().create("DiffFileActionImpl")).copyTmpFileToPath(fileDTO.getFileContent(), oriFileCode);
+		System.out.println("2. move tmpFIle to realPath : path : "+fileDTO.getFileContent());
+		
+		if(!commitInfoList.isEmpty())System.out.println("-- size  : "+commitInfoList.size());
+		else System.out.println("--  is empty...");
+		System.out.println("makeModelContent END  !!!! \n\n");
+		return commitInfoList;
+	}
+	private int convertType(String type){
+		int kind;
+		if(type.equals("create"))kind=0;
+		else if(type.equals("modify"))kind=1;
+		else kind=2;
+		return kind;
+	}
+	private int convertMerge(boolean merge){
+		int kind=0;
+		if(merge)kind=1;
+		return kind;
+	}
+}
